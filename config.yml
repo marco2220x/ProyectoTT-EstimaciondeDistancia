@@ -1,0 +1,18 @@
+# File location of models.
+model_path:
+  coco_names: C:\Users\matar\Scene-Distance-Estimation-Using-Monocular-Depth-Estimation\models\coco.names
+  coco_yolo_cfg: C:\Users\matar\Scene-Distance-Estimation-Using-Monocular-Depth-Estimation\models\yolov3.cfg
+  coco_yolo_weights: C:\Users\matar\Scene-Distance-Estimation-Using-Monocular-Depth-Estimation\models\yolov3.weights
+
+  MDE_model_path: C:\Users\matar\Scene-Distance-Estimation-Using-Monocular-Depth-Estimation\models\model-small.onnx
+ 
+# Camera information.
+camera_information:
+  sensor_height_mm: 4.8        # Camera Sensor height in mm
+  sensor_height_px: 1080       # Camera feed native pixel resolution height   
+  focal_length: 12
+
+# Target Object information
+target_object:
+  target: person
+  real_object_height: 1700     # Target Object physical height in mm
