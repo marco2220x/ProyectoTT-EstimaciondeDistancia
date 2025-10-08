@@ -1,118 +1,109 @@
-# main.py (procesamiento OFFLINE -> guarda video resultante)
+# main_dataset.py (generar dataset de frames + CSV del target con IoU)
 import cv2
 import os
-import numpy as np
-import time
+import csv
+from glob import glob
+from ultralytics import YOLO
 
-from modules.SceneLocator import FindObjects
-from modules.MonocularEstimator import MonocularEstimator
-from modules.TargetObjectLocator import FindTargetObject
 from modules.ROITarget import TargetTracker
+from modules.LensOpticCalculator import LensOpticCalculator
 
-# --- Configuración de paths ---
-input_path = "test/test2.mp4"
-output_dir = "runs"
-os.makedirs(output_dir, exist_ok=True)
+# --- Configuración ---
+input_dir = "test"
+step_min = 5  # mínimo número de frames a saltar
+iou_threshold = 0.85  # IoU máximo para considerar frame similar
+output_dir = "dataset"
+images_dir = os.path.join(output_dir, "images")
+os.makedirs(images_dir, exist_ok=True)
 
-basename = os.path.splitext(os.path.basename(input_path))[0]
-output_path = os.path.join(output_dir, f"{basename}_processed.mp4")
+csv_path = os.path.join(output_dir, "annotations.csv")
+csv_exists = os.path.exists(csv_path)
 
-# --- Abrir video ---
-cap = cv2.VideoCapture(input_path)
-if not cap.isOpened():
-    raise RuntimeError(f"No se pudo abrir el archivo de vídeo: {input_path}")
+# --- Inicializar YOLO + Tracker ---
+yolo = YOLO("yolov8n.pt")
+tracker = TargetTracker(yolo_model=yolo)
 
-fps = cap.get(cv2.CAP_PROP_FPS)
-if fps == 0 or np.isnan(fps):
-    fps = 30  # fallback
-w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+# --- Función IoU ---
+def compute_iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
 
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+    interW = max(0, xB - xA)
+    interH = max(0, yB - yA)
+    interArea = interW * interH
 
-# --- Inicializar tracker (carga YOLO una vez) ---
-tracker = TargetTracker(model_path="yolov8n.pt",
-                        max_age=30,
-                        conf_thresh=0.35,
-                        sim_thresh=0.7,
-                        max_missed=60)
+    boxAArea = (boxA[2]-boxA[0]) * (boxA[3]-boxA[1])
+    boxBArea = (boxB[2]-boxB[0]) * (boxB[3]-boxB[1])
 
-frame_idx = 0
-print(f"[INFO] Procesando {input_path} -> {output_path} (fps={fps}, size=({w},{h}))")
+    iou = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+    return iou
 
-start_time = time.time()
+# --- Abrir CSV ---
+with open(csv_path, mode="a", newline="") as csvfile:
+    writer = csv.writer(csvfile)
+    if not csv_exists:
+        writer.writerow(["filename", "xmin", "ymin", "xmax", "ymax", "distance"])
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+    saved_idx = 0
 
-    bgr_frame = frame  # VideoCapture devuelve BGR
-    # Convertir a RGB porque tu MonocularEstimator espera RGB
-    rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+    # --- Recorrer todos los videos ---
+    video_paths = sorted(glob(os.path.join(input_dir, "*.mp4")))
+    for input_path in video_paths:
+        print(f"[INFO] Procesando video: {input_path}")
+        basename = os.path.splitext(os.path.basename(input_path))[0]
 
-    # 1) Generar mapa de profundidad (MDE)
-    monocular_depth_val = MonocularEstimator(rgb_frame)
+        cap = cv2.VideoCapture(input_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_idx = 0
+        prev_bbox = None
+        frames_since_last_save = 0
 
-    # 2) Actualizar tracker (le pasamos BGR)
-    tracker_result = tracker.update(bgr_frame, draw=False)
-    # tracker.update puede devolver either bbox o (bbox, vis) si draw=True
-    if tracker_result is not None and len(tracker_result) == 4:
-      target_bbox = tracker_result  # (x1, y1, x2, y2)
-    else:
-      target_bbox = None
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-    # 3) Encontrar target usando el bbox (si existe)
-    target_object_depth_val = FindTargetObject(rgb_frame, target_bbox, monocular_depth_val)
+            frame_idx += 1
+            frames_since_last_save += 1
 
-    # 4) Detección de objetos circundantes y cálculo con la referencia
-    FindObjects(rgb_frame, target_object_depth_val, monocular_depth_val)
+            target_bbox, _ = tracker.update(frame, draw=False)
+            if target_bbox is None:
+                continue
 
-    # 5) Convertir a BGR para escritura (y para que OpenCV muestre colores correctamente)
-    out_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+            # --- Calcular IoU con frame previo ---
+            save_frame = True
+            if prev_bbox is not None:
+                iou = compute_iou(prev_bbox, target_bbox)
+                if iou > iou_threshold and frames_since_last_save < step_min:
+                    save_frame = False
 
-    # 6) Anotar info del target en el frame (si está disponible)
-    if target_bbox is not None:
-        x1, y1, x2, y2 = target_bbox
-        cv2.rectangle(out_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        if tracker.target_id is not None:
-            cv2.putText(out_frame, f"ID {tracker.target_id}", (x1, max(0, y1-10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            if not save_frame:
+                continue
 
-    # Mostrar distancia calculada del target (si FindTargetObject la devolvió)
-    if target_object_depth_val is not None:
-        try:
-            computed = target_object_depth_val[0]  # valor retornado por LensOpticCalculator
-            midas_val = target_object_depth_val[1]
-            # Ajusta formato y texto según tu unidad real (aquí lo mostramos sin especificar unidad)
-            text = f"Target calc: {computed:.2f}"
-            text2 = f"MDE val: {midas_val:.3f}"
-            # Posicionar el texto sobre la bbox si existe, si no en (10,30)
-            if target_bbox is not None:
-                tx, ty = x1, max(0, y1 - 30)
-            else:
-                tx, ty = 10, 30
-            cv2.putText(out_frame, text, (tx, ty),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
-            cv2.putText(out_frame, text2, (tx, ty + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
-        except Exception as e:
-            # Si la estructura cambió, evitamos romper el loop
-            pass
+            # --- Guardar bbox anterior ---
+            prev_bbox = target_bbox
+            frames_since_last_save = 0
 
-    # 7) Escribir frame procesado al video de salida
-    out.write(out_frame)
+            x1, y1, x2, y2 = target_bbox
+            h = y2 - y1
+            if h <= 0:
+                continue
 
-    # Progreso simple por consola
-    frame_idx += 1
-    if frame_idx % 200 == 0:
-        print(f"[INFO] Procesados {frame_idx} frames...")
+            # --- Calcular distancia solo con LensOpticCalculator ---
+            distance_m = LensOpticCalculator(h) / 1000.0  # convertir mm -> m
 
-# Liberar recursos
-cap.release()
-out.release()
-end_time = time.time()
-elapsed = end_time - start_time
-print(f"[INFO] Tiempo total de procesamiento: {elapsed: .2f} segundos")
-print(f"[INFO] Procesamiento completado. Video guardado en: {output_path}")
+            # --- Guardar frame como imagen ---
+            filename = f"{basename}_{saved_idx:05d}.jpg"
+            filepath = os.path.join(images_dir, filename)
+            cv2.imwrite(filepath, frame)
+
+            # --- Guardar fila en CSV ---
+            writer.writerow([filename, x1, y1, x2, y2, f"{distance_m:.3f}"])
+            saved_idx += 1
+
+        cap.release()
+        print(f"[INFO] Video {basename} procesado, frames guardados: {saved_idx}")
+
+print(f"[INFO] Dataset completo generado en {output_dir}")
