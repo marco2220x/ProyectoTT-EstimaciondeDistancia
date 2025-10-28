@@ -44,7 +44,9 @@ def compute_iou(boxA, boxB):
 with open(csv_path, mode="a", newline="") as csvfile:
     writer = csv.writer(csvfile)
     if not csv_exists:
-        writer.writerow(["filename", "xmin", "ymin", "xmax", "ymax", "distance"])
+        writer.writerow(["filename", "xmin", "ymin", "xmax", "ymax", 
+                         "width", "height", "distance", 
+                         "x_center", "y_center",])
 
     saved_idx = 0
 
@@ -87,20 +89,26 @@ with open(csv_path, mode="a", newline="") as csvfile:
             frames_since_last_save = 0
 
             x1, y1, x2, y2 = target_bbox
-            h = y2 - y1
-            if h <= 0:
+
+            width = x2 - x1
+            height = y2 - y1
+            if height <= 0 or width <= 0:
                 continue
 
             # --- Calcular distancia solo con LensOpticCalculator ---
-            distance_m = LensOpticCalculator(h) / 1000.0  # convertir mm -> m
+            distance_m = LensOpticCalculator(height) / 1000.0  # convertir mm -> m
 
+            x_center = (x1 + x2) / 2.0
+            y_center = (y1 + y2) / 2.0
             # --- Guardar frame como imagen ---
             filename = f"{basename}_{saved_idx:05d}.jpg"
             filepath = os.path.join(images_dir, filename)
             cv2.imwrite(filepath, frame)
 
             # --- Guardar fila en CSV ---
-            writer.writerow([filename, x1, y1, x2, y2, f"{distance_m:.3f}"])
+            writer.writerow([filename, x1, y1, x2, y2,  f"{width:.1f}", f"{height:.1f}",
+                f"{distance_m:.3f}",
+                f"{x_center:.1f}", f"{y_center:.1f}",])
             saved_idx += 1
 
         cap.release()
